@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>云同步·瀑布流莫兰迪杂志追踪器</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- 引入 Supabase 官方 JavaScript SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        /* 莫兰迪自定义核心配色 */
+        :root {
+            --morandi-bg: #F0EFEA;        /* 燕麦灰白背景 */
+            --morandi-sidebar: #8EA4B3;   /* 雾霾灰蓝左侧栏 */
+            --morandi-card: #E5E2D9;      /* 灰陶色卡片背景 */
+            --morandi-green: #A2B59F;     /* 鼠尾草绿（已读点亮） */
+            --morandi-text-dark: #4A4E4D; /* 碳灰（主文字） */
+            --morandi-text-light: #7E8280;/* 浅灰（次要文字） */
+        }
+        
+        body {
+            background-color: var(--morandi-bg);
+            color: var(--morandi-text-dark);
+        }
+        
+        .no-select {
+            user-select: none;
+            -webkit-user-select: none;
+        }
+    </style>
+</head>
+<body class="min-h-screen font-sans no-select flex flex-col md:flex-row h-screen overflow-hidden">
+
+    <!-- 左侧栏：雾霾灰蓝 -->
+    <div style="background-color: var(--morandi-sidebar);" class="w-full md:w-64 p-5 flex flex-col justify-between shrink-0 shadow-lg text-white z-10">
+        <div>
+            <h1 class="text-xl font-bold mb-6 tracking-wide flex items-center gap-2 opacity-95">
+                ☁️ 纵向云端追踪
+            </h1>
+            
+            <!-- 添加杂志输入框与按钮 -->
+            <div class="mb-5 flex gap-2">
+                <input type="text" id="newMagazineInput" placeholder="新杂志名称..." 
+                       class="bg-white/20 text-sm rounded px-3 py-2 text-white placeholder-white/60 w-full focus:outline-none focus:ring-2 focus:ring-white/40 border border-white/10">
+                <button onclick="addMagazine()" class="bg-white/30 hover:bg-white/40 text-white px-3 py-2 rounded font-bold text-sm transition shadow-sm">
+                    +
+                </button>
+            </div>
+
+            <!-- 杂志列表 -->
+            <div id="magazineList" class="space-y-1.5 overflow-y-auto max-h-[calc(100vh-220px)]">
+                <div class="text-sm opacity-60 p-2">同步中...</div>
+            </div>
+        </div>
+        
+        <!-- 云同步状态提示 -->
+        <div id="syncStatus" class="text-[11px] opacity-70 text-center border-t border-white/20 pt-3">
+            数据已与云端实时同步
+        </div>
+    </div>
+
+    <!-- 右侧栏：无限滚动日历看板 -->
+    <div class="flex-1 p-6 overflow-y-auto flex flex-col">
+        <div class="w-full mx-auto flex flex-col flex-1">
+            
+            <!-- 头部静态统计栏 -->
+            <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-6 border-b border-gray-300/60 pb-4 shrink-0">
+                <div>
+                    <h2 id="currentMagazineTitle" style="color: var(--morandi-text-dark);" class="text-2xl font-semibold tracking-wide">加载中...</h2>
+                    <p style="color: var(--morandi-text-light);" class="text-xs mt-1">日历从 2010 年一直延伸至 2035 年，直接向下滚动即可</p>
+                </div>
+                
+                <div class="flex items-center gap-3">
+                    <!-- 天数统计 -->
+                    <div style="background-color: var(--morandi-card); color: var(--morandi-text-dark);" class="text-sm px-4 py-2 rounded-lg border border-gray-300/40 font-medium shadow-sm">
+                        累计已读: <span id="statCount" class="font-bold text-gray-700 underline decoration-2 decoration-[#A2B59F] underline-offset-4">0</span> 天
+                    </div>
+                </div>
+            </div>
+
+            <!-- 时间轴主容器，每个年份占一行，内含两行（每行6个月） -->
+            <div id="timelineContainer" class="space-y-10 pb-12">
+                <!-- 由 JS 动态生成 2010 到 2035 年的所有月历墙 -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ===!!! 请在此处填入你的 SUPABASE 真实凭证 !!!===
+        const SUPABASE_URL = "https://gxndvvhvatqmaueyetxu.supabase.co"; 
+        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4bmR2dmh2YXRxbWF1ZXlldHh1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMxMDE2ODAsImV4cCI6MjA5ODY3NzY4MH0.NiqQOrORB5fEZ4hlE-vbefxmhSKg-VyfxHDBW_d-ESk";
+        
+        // 初始化 Supabase 客户端
+        const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        // --- 核心配置 ---
+        const START_YEAR = 2010;
+        const END_YEAR = 2035;
+
+        // --- 数据状态 ---
+        let state = {
+            magazines: [],
+            records: {}, // 格式: { "杂志id": { "YYYY-MM-DD": true } }
+            currentMagazineId: null
+        };
+
+        let isDragging = false;
+        let dragMode = true; 
+
+        // 页面启动从云端加载
+        async function init() {
+            setupGlobalMouseEvents();
+            await loadDataFromCloud();
+            renderMagazineList();
+            renderTimelineCalendar();
+        }
+
+        // 从 Supabase 数据库拉取全量数据
+        async function loadDataFromCloud() {
+            setSyncStatus("同步中...");
+            try {
+                // 1. 获取杂志列表
+                let { data: mags, error: e1 } = await supabase.from('magazines').select('*').order('created_at');
+                if (e1) throw e1;
+                state.magazines = mags || [];
+                
+                if (state.magazines.length > 0 && !state.currentMagazineId) {
+                    state.currentMagazineId = state.magazines[0].id;
+                }
+
+                // 2. 获取打卡记录
+                let { data: recs, error: e2 } = await supabase.from('reading_records').select('*');
+                if (e2) throw e2;
+                
+                state.records = {};
+                recs.forEach(r => {
+                    if (!state.records[r.magazine_id]) state.records[r.magazine_id] = {};
+                    state.records[r.magazine_id][r.date_str] = true;
+                });
+                
+                setSyncStatus("云端数据同步成功");
+            } catch (err) {
+                console.error(err);
+                setSyncStatus("离线模式：读取本地缓存");
+                // 降级使用本地存储
+                const local = JSON.parse(localStorage.getItem('magazine_tracker_state'));
+                if(local) state = local;
+            }
+        }
+
+        // 向云端实时写入/删除单条打卡（涂色）
+        async function cloudSaveRecord(dateStr, isAdd) {
+            if (!state.currentMagazineId) return;
+            // 备份在本地防止突发断网
+            localStorage.setItem('magazine_tracker_state', JSON.stringify(state));
+
+            try {
+                if (isAdd) {
+                    await supabase.from('reading_records').upsert({ 
+                        magazine_id: state.currentMagazineId, 
+                        date_str: dateStr 
+                    }, { onConflict: 'magazine_id,date_str' });
+                } else {
+                    await supabase.from('reading_records').delete()
+                        .eq('magazine_id', state.currentMagazineId)
+                        .eq('date_str', dateStr);
+                }
+            } catch (e) {
+                console.error("同步单条记录失败", e);
+            }
+        }
+
+        // 添加新杂志到 Supabase
+        async function addMagazine() {
+            const input = document.getElementById('newMagazineInput');
+            const name = input.value.trim();
+            if (!name) return;
+            
+            setSyncStatus("正在保存新杂志...");
+            try {
+                const { data, error } = await supabase.from('magazines').insert({ name: name }).select();
+                if(!error && data) {
+                    state.currentMagazineId = data[0].id;
+                    await loadDataFromCloud();
+                    renderMagazineList();
+                    renderTimelineCalendar();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+            input.value = '';
+        }
+
+        // 从云端删除杂志及其所有历史数据
+        async function deleteMagazine(id) {
+            if (confirm('确定要删除这本杂志的所有云端记录吗？（不可逆）')) {
+                setSyncStatus("正在从云端删除...");
+                try {
+                    await supabase.from('reading_records').delete().eq('magazine_id', id);
+                    await supabase.from('magazines').delete().eq('id', id);
+                    state.currentMagazineId = null;
+                    await loadDataFromCloud();
+                    renderMagazineList();
+                    renderTimelineCalendar();
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+        }
+
+        // --- 渲染逻辑 ---
+        function setSyncStatus(msg) {
+            document.getElementById('syncStatus').innerText = "☁️ " + msg;
+        }
+
+        function renderMagazineList() {
+            const listEl = document.getElementById('magazineList');
+            listEl.innerHTML = '';
+            
+            if(state.magazines.length === 0) {
+                listEl.innerHTML = `<div class="text-xs opacity-60 p-2">暂无杂志，请在上方添加</div>`;
+            }
+            
+            state.magazines.forEach(mag => {
+                const isSelected = mag.id === state.currentMagazineId;
+                const btn = document.createElement('div');
+                btn.className = `flex justify-between items-center group px-3 py-2.5 rounded-lg cursor-pointer transition text-sm ${
+                    isSelected ? 'bg-white/25 text-white font-semibold shadow-inner' : 'hover:bg-white/10 text-white/90'
+                }`;
+                
+                btn.onclick = () => {
+                    state.currentMagazineId = mag.id;
+                    renderMagazineList();
+                    renderTimelineCalendar();
+                };
+
+                btn.innerHTML = `
+                    <span class="truncate">📔 ${mag.name}</span>
+                    <button onclick="event.stopPropagation(); deleteMagazine('${mag.id}')" 
+                            class="text-white/40 hover:text-red-200 opacity-0 group-hover:opacity-100 transition px-1 text-xs">
+                        ✕
+                    </button>
+                `;
+                listEl.appendChild(btn);
+            });
+
+            const currentMag = state.magazines.find(m => m.id === state.currentMagazineId);
+            document.getElementById('currentMagazineTitle').innerText = currentMag ? currentMag.name : '暂无选定杂志';
+        }
+
+        // 渲染纵向大日历瀑布流
+        function renderTimelineCalendar() {
+            const container = document.getElementById('timelineContainer');
+            container.innerHTML = '';
+            
+            if (!state.currentMagazineId) {
+                container.innerHTML = `<div class="text-center text-gray-400 py-12">请先在左侧添加杂志</div>`;
+                document.getElementById('statCount').innerText = '0';
+                return;
+            }
+
+            const currentMagRecords = state.records[state.currentMagazineId] || {};
+            let totalReadDays = 0;
+
+            // 循环遍历年份
+            for (let year = START_YEAR; year <= END_YEAR; year++) {
+                const yearBlock = document.createElement('div');
+                yearBlock.className = "space-y-3";
+                yearBlock.innerHTML = `
+                    <div class="flex items-center gap-4 text-stone-600 font-bold tracking-widest text-lg border-l-4 border-[#8EA4B3] pl-3">
+                        <span>${year} 年</span>
+                    </div>
+                `;
+
+                // 响应式月份网格
+                const monthsGrid = document.createElement('div');
+                monthsGrid.className = "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3.5";
+
+                for (let month = 0; month < 12; month++) {
+                    const monthDiv = document.createElement('div');
+                    monthDiv.style.backgroundColor = 'var(--morandi-card)';
+                    monthDiv.className = "p-3 rounded-xl border border-gray-300/30 shadow-sm flex flex-col justify-between";
+                    
+                    const monthName = new Date(year, month, 1).toLocaleString('zh-CN', { month: 'long' });
+                    monthDiv.innerHTML = `<h4 style="color: var(--morandi-text-dark);" class="text-[11px] font-bold tracking-wider mb-2 border-b border-gray-400/20 pb-1">${monthName}</h4>`;
+                    
+                    const grid = document.createElement('div');
+                    grid.className = "grid grid-cols-7 gap-1 text-center";
+                    
+                    ['日', '一', '二', '三', '四', '五', '六'].forEach(wd => {
+                        const wdEl = document.createElement('div');
+                        wdEl.style.color = 'var(--morandi-text-light)';
+                        wdEl.className = "text-[9px] font-semibold scale-90 py-0.5";
+                        wdEl.innerText = wd;
+                        grid.appendChild(wdEl);
+                    });
+
+                    const firstDayIndex = new Date(year, month, 1).getDay();
+                    const totalDays = new Date(year, month + 1, 0).getDate();
+
+                    for (let i = 0; i < firstDayIndex; i++) grid.appendChild(document.createElement('div'));
+
+                    for (let day = 1; day <= totalDays; day++) {
+                        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                        const isRead = !!currentMagRecords[dateStr];
+                        if (isRead) totalReadDays++;
+
+                        const cell = document.createElement('div');
+                        cell.dataset.date = dateStr;
+                        cell.className = "aspect-square flex items-center justify-center text-[10px] rounded font-medium cursor-pointer transition-all duration-300 select-none border";
+                        cell.innerText = day;
+
+                        if (isRead) {
+                            cell.style.backgroundColor = 'var(--morandi-green)';
+                            cell.style.borderColor = 'transparent';
+                            cell.style.color = '#FFF';
+                            cell.style.fontWeight = 'bold';
+                        } else {
+                            cell.style.backgroundColor = '#FAF9F6';
+                            cell.style.borderColor = '#E2DFD2';
+                            cell.style.color = 'var(--morandi-text-dark)';
+                        }
+
+                        // 鼠标/触屏拖拽连线涂色核心逻辑
+                        cell.onmousedown = (e) => {
+                            e.preventDefault();
+                            isDragging = true;
+                            dragMode = !isRead; 
+                            toggleDateState(dateStr, dragMode, cell);
+                        };
+
+                        cell.onmouseenter = () => { if (isDragging) toggleDateState(dateStr, dragMode, cell); };
+                        grid.appendChild(cell);
+                    }
+                    monthDiv.appendChild(grid);
+                    monthsGrid.appendChild(monthDiv);
+                }
+                yearBlock.appendChild(monthsGrid);
+                container.appendChild(yearBlock);
+            }
+            document.getElementById('statCount').innerText = totalReadDays;
+        }
+
+        function toggleDateState(dateStr, mode, element) {
+            if (!state.currentMagazineId) return;
+            if (!state.records[state.currentMagazineId]) state.records[state.currentMagazineId] = {};
+            const currentRecords = state.records[state.currentMagazineId];
+            
+            if (mode) {
+                if (!currentRecords[dateStr]) {
+                    currentRecords[dateStr] = true;
+                    element.style.backgroundColor = 'var(--morandi-green)';
+                    element.style.borderColor = 'transparent';
+                    element.style.color = '#FFF';
+                    element.style.fontWeight = 'bold';
+                    updateLiveCounter(1);
+                    cloudSaveRecord(dateStr, true);
+                }
+            } else {
+                if (currentRecords[dateStr]) {
+                    delete currentRecords[dateStr];
+                    element.style.backgroundColor = '#FAF9F6';
+                    element.style.borderColor = '#E2DFD2';
+                    element.style.color = 'var(--morandi-text-dark)';
+                    element.style.fontWeight = 'medium';
+                    updateLiveCounter(-1);
+                    cloudSaveRecord(dateStr, false);
+                }
+            }
+        }
+
+        function updateLiveCounter(diff) {
+            const counterEl = document.getElementById('statCount');
+            let currentNum = parseInt(counterEl.innerText) || 0;
+            counterEl.innerText = currentNum + diff;
+        }
+
+        function setupGlobalMouseEvents() {
+            window.onmouseup = () => {
+                if (isDragging) {
+                    isDragging = false;
+                    setSyncStatus("云端同步完成");
+                }
+            };
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
